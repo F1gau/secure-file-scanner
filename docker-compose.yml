@@ -1,0 +1,91 @@
+# Usage:  cp .env.example .env   (set JWT_SECRET)   &&   docker compose up --build
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: postgresql+asyncpg://scanner:${POSTGRES_PASSWORD:-scanner}@db:5432/scanner
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+  MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-10}
+  STORAGE_PATH: /data/storage
+  RATE_LIMIT_LOGIN: ${RATE_LIMIT_LOGIN:-5}
+  RATE_LIMIT_UPLOAD: ${RATE_LIMIT_UPLOAD:-20}
+  MAX_ARCHIVE_FILES: ${MAX_ARCHIVE_FILES:-500}
+  MAX_EXTRACTED_SIZE_MB: ${MAX_EXTRACTED_SIZE_MB:-100}
+  MAX_ARCHIVE_DEPTH: ${MAX_ARCHIVE_DEPTH:-2}
+  SCAN_TIME_LIMIT_SECONDS: ${SCAN_TIME_LIMIT_SECONDS:-300}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scanner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scanner}
+      POSTGRES_DB: scanner
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanner -d scanner"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker",
+              "--loglevel=INFO", "--concurrency=2"]
+    environment: *app-env
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  storage:

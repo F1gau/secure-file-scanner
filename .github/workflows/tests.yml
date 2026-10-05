@@ -1,0 +1,84 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: scanner
+          POSTGRES_PASSWORD: scanner
+          POSTGRES_DB: scanner
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scanner -d scanner"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Throw-away values that exist only inside this CI job.
+      APP_ENV: test
+      JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else-0123456789
+      DATABASE_URL: postgresql+asyncpg://scanner:scanner@localhost:5432/scanner
+      REDIS_URL: redis://localhost:6379/0
+      BCRYPT_ROUNDS: "4"
+      INTEGRATION_DATABASE_URL: postgresql+asyncpg://scanner:scanner@localhost:5432/scanner
+      INTEGRATION_REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Check that the application imports
+        run: python -c "import app.main; import app.workers.celery_app; print('import ok')"
+
+      - name: Apply migrations to PostgreSQL
+        run: alembic upgrade head
+
+      - name: Models and migrations are in sync
+        run: alembic check
+
+      - name: Migrations are reversible
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Run tests (unit + integration against PostgreSQL and Redis)
+        run: pytest -o addopts="" -v --maxfail=5
